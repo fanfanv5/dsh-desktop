@@ -149,11 +149,13 @@ pub fn spawn_dsh(
     job: &Job,
     state: &ProcessState,
 ) -> std::io::Result<u32> {
-    const MAX_ATTEMPTS: u32 = 3;
+    const MAX_ATTEMPTS: u32 = 6;
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..MAX_ATTEMPTS {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            // Freshly-created profile junctions can take a while to become
+            // visible to a new node process on Windows; back off generously.
+            std::thread::sleep(std::time::Duration::from_millis(8000));
         }
         match spawn_once(node, bin_js, log_dir, proxy.clone(), job, state) {
             Ok(pid) => return Ok(pid),

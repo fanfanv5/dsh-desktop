@@ -73,35 +73,37 @@ impl Runtime {
         }
     }
 
-    /// Run dsh's profile boot once (via `web --help`) so the first real
-    /// launch doesn't fail while dsh sets up its ~/.dsh profile (junctions,
-    /// cordis.yml, caches). Best-effort: failures are ignored here and are
-    /// recovered by the spawn retry loop instead.
-    pub fn prewarm(&self, timeout: Duration) {
+    /// Run a full `dsh web --port 0` boot once and wait for it to print its
+    /// URL, then kill it. This settles the ~/.dsh profile junctions AND warms
+    /// the module import cache, so the first real launch doesn't race them.
+    /// Best-effort: failures are ignored here and recovered by the spawn retry
+    /// loop instead.
+    pub fn prewarm(&self, _timeout: Duration) {
+        use std::io::{BufRead, BufReader};
+        use std::sync::mpsc;
+
         let mut cmd = Command::new(&self.node);
-        cmd.arg(self.bin_js()).arg("web").arg("--help");
+        cmd.arg(self.bin_js()).arg("web").arg("--port").arg("0");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = cmd.spawn() else { return };
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if start.elapsed() > timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
+        let Some(stdout) = child.stdout.take() else { return };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().flatten() {
+                if line.contains("dsh web: http://") {
+                    let _ = tx.send(());
+                    break;
                 }
-                Err(_) => break,
             }
-        }
+        });
+        let _ = rx.recv_timeout(Duration::from_secs(60));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// Install the latest @deepseek-ai/dsh into the managed runtime dir.
