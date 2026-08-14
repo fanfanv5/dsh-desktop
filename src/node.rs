@@ -1,36 +1,48 @@
-//! Node.js runtime detection (from PATH).
+//! Node.js runtime detection (from PATH), cross-platform.
 
 use std::path::PathBuf;
 
 pub struct NodeEnv {
-    /// Path to node.exe.
+    /// Path to the node executable.
     pub node: PathBuf,
-    /// Path to npm's cli entry (npm-cli.js), used to avoid .cmd quoting issues.
+    /// npm entry point. On Windows this is npm-cli.js (invoked as
+    /// `node <npm-cli.js>`); on Unix it is the `npm` command (invoked directly).
     pub npm_cli: PathBuf,
 }
 
-/// Find node.exe on PATH, then derive the sibling npm-cli.js location.
+/// Find node on PATH, then derive the npm entry point.
 pub fn detect_node() -> Option<NodeEnv> {
-    let node = find_on_path("node.exe")?;
-    // Resolve symlinks (e.g. nvm-windows' C:\nvm4w\nodejs -> the real version
-    // dir), so the sibling npm-cli.js is located correctly.
-    let node = std::fs::canonicalize(&node).unwrap_or(node);
-    let node = strip_verbatim_prefix(node);
-    let dir = node.parent()?;
-    let npm_cli = dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
-    // If npm-cli.js is not beside node (unusual layout), fall back to a PATH lookup.
-    let npm_cli = if npm_cli.is_file() {
-        npm_cli
-    } else {
-        find_on_path("npm-cli.js")?
-    };
-    Some(NodeEnv { node, npm_cli })
+    #[cfg(windows)]
+    {
+        let node = find_on_path("node.exe")?;
+        // Resolve symlinks (e.g. nvm-windows' C:\nvm4w\nodejs -> the real version
+        // dir), so the sibling npm-cli.js is located correctly.
+        let node = std::fs::canonicalize(&node).unwrap_or(node);
+        let node = strip_verbatim_prefix(node);
+        let dir = node.parent()?;
+        let npm_cli = dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+        // If npm-cli.js is not beside node (unusual layout), fall back to a PATH lookup.
+        let npm_cli = if npm_cli.is_file() {
+            npm_cli
+        } else {
+            find_on_path("npm-cli.js")?
+        };
+        Some(NodeEnv { node, npm_cli })
+    }
+
+    #[cfg(not(windows))]
+    {
+        let node = find_on_path("node")?;
+        let npm = find_on_path("npm")?;
+        Some(NodeEnv { node, npm_cli: npm })
+    }
 }
 
 /// `std::fs::canonicalize` returns a verbatim path on Windows
 /// (leading backslash-backslash-question-backslash prefix), which node.js
 /// rejects when it is the entry script (EISDIR lstat 'C:'). Strip it back
 /// to a normal path before handing it to node.
+#[cfg(windows)]
 fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy().into_owned();
     const PREFIX: &str = "\\\\?\\";

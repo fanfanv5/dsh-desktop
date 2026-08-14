@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod events;
 mod init_ui;
@@ -85,13 +85,22 @@ fn main() {
 }
 
 fn cleanup(job: &Job, state: &ProcessState) {
-    if state.assigned.load(Ordering::Relaxed) {
-        job.kill_all();
-    } else if let Some(pid) = *state.pid.lock().unwrap() {
-        // Fallback for when the child could not be placed in the job object.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output();
+    if let Some(pid) = *state.pid.lock().unwrap() {
+        if state.assigned.load(Ordering::Relaxed) {
+            job.kill_all(pid);
+        } else {
+            // Fallback for when the child could not be placed in the job object.
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output();
+            }
+            #[cfg(unix)]
+            {
+                unsafe { let _ = libc::kill(pid as i32, libc::SIGKILL); }
+            }
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 name = "dsh-desktop"
 version = "0.1.0"
 edition = "2021"
-description = "Windows desktop shell for the DeepSeek Harness CLI (@deepseek-ai/dsh)"
+description = "Desktop shell for the DeepSeek Harness CLI (@deepseek-ai/dsh)"
 license = "MIT"
 
 [[bin]]
@@ -15,12 +15,17 @@ tauri-winres = "0.3"
 [dependencies]
 tao = "0.36"
 wry = "0.56"
+
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

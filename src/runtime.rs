@@ -9,7 +9,8 @@ use crate::node::NodeEnv;
 
 pub const PKG: &str = "@deepseek-ai/dsh";
 
-/// Prevent console windows flashing when we shell out to node.
+/// Prevent console windows flashing when we shell out to node (Windows).
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct Runtime {
@@ -101,10 +102,15 @@ impl Runtime {
 
     /// Run an npm subcommand through node + npm-cli.js, capturing output with a timeout.
     fn npm_capture(&self, args: &[&str], timeout: Duration) -> Option<Output> {
-        use std::os::windows::process::CommandExt;
-
-        let mut cmd = Command::new(&self.node);
-        cmd.arg(&self.npm_cli);
+        // Windows: node <npm-cli.js> <args> (avoids npm.cmd quoting issues).
+        // Unix: npm <args> directly.
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new(&self.node);
+            c.arg(&self.npm_cli);
+            c
+        } else {
+            Command::new(&self.npm_cli)
+        };
         cmd.args(args);
         // Default to the npmmirror.com mirror: the official registry is slow
         // and frequently connection-reset on this network. DSH_NPM_REGISTRY
@@ -112,7 +118,11 @@ impl Runtime {
         let registry = std::env::var_os("DSH_NPM_REGISTRY")
             .unwrap_or_else(|| std::ffi::OsString::from("https://registry.npmmirror.com"));
         cmd.env("npm_config_registry", registry);
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().ok()?;

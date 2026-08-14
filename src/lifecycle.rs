@@ -143,8 +143,15 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
         match spawn_dsh(&node_env.node, &runtime.bin_js(), &paths.logs, proxy.clone(), &job, &state) {
             Ok(_) => {
                 // The Ready event is delivered by the stdout reader thread; the
-                // dsh process keeps running independently. Controller is done.
-                return;
+                // dsh process keeps running independently. Stay alive so that a
+                // later "重试" click (shown if dsh exits unexpectedly) can
+                // re-spawn instead of being silently dropped.
+                loop {
+                    match wait_command(&rx) {
+                        Some(Command::Retry) => continue 'outer,
+                        _ => return,
+                    }
+                }
             }
             Err(e) => {
                 status(&proxy, "启动失败", &format!("无法启动 dsh web：{}", e), &["retry"]);
