@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tao::window::WindowBuilder;
+use tao::window::{Icon, WindowBuilder};
 use wry::WebViewBuilder;
 
 use events::{Command, UiEvent};
@@ -33,6 +33,7 @@ fn main() {
         .with_title("DSH Desktop")
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(tao::dpi::LogicalSize::new(720.0, 520.0))
+        .with_window_icon(load_icon())
         .build(&event_loop)
         .expect("failed to build window");
 
@@ -102,6 +103,13 @@ fn cleanup(job: &Job, state: &ProcessState) {
             }
         }
     }
+}
+
+/// Load the window/titlebar icon from the embedded RGBA data.
+fn load_icon() -> Option<Icon> {
+    const ICON_RGBA: &[u8] = include_bytes!("../assets/icon-64.rgba");
+    const ICON_SIZE: u32 = 64;
+    Icon::from_rgba(ICON_RGBA.to_vec(), ICON_SIZE, ICON_SIZE).ok()
 }
 
 fn send_status(webview: &wry::WebView, title: &str, detail: &str, actions: &[String]) {
