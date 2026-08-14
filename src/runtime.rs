@@ -73,6 +73,37 @@ impl Runtime {
         }
     }
 
+    /// Run dsh's profile boot once (via `web --help`) so the first real
+    /// launch doesn't fail while dsh sets up its ~/.dsh profile (junctions,
+    /// cordis.yml, caches). Best-effort: failures are ignored here and are
+    /// recovered by the spawn retry loop instead.
+    pub fn prewarm(&self, timeout: Duration) {
+        let mut cmd = Command::new(&self.node);
+        cmd.arg(self.bin_js()).arg("web").arg("--help");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else { return };
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
     /// Install the latest @deepseek-ai/dsh into the managed runtime dir.
     pub fn install_latest(&self, timeout: Duration) -> Option<Output> {
         // Give npm a package.json anchor so it installs into runtime_dir.

@@ -215,7 +215,14 @@ fn spawn_once(
     let out_log = log_dir.join("dsh-web.out.log");
     let out_proxy = proxy;
     std::thread::spawn(move || {
-        let mut log = std::fs::File::create(&out_log).ok();
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&out_log)
+            .ok();
+        if let Some(f) = log.as_mut() {
+            let _ = writeln!(f, "--- dsh web spawn ---");
+        }
         let mut ready = false;
         for line in BufReader::new(stdout).lines().flatten() {
             if let Some(f) = log.as_mut() {
@@ -232,10 +239,16 @@ fn spawn_once(
         // EOF: dropping ready_tx signals "exited before ready" to the waiter.
     });
 
-    // stderr reader: drain to a log for diagnostics.
+    // stderr reader: drain to a log for diagnostics (append, so a failed
+    // launch's error survives a later successful one).
     let err_log = log_dir.join("dsh-web.err.log");
     std::thread::spawn(move || {
-        if let Ok(mut f) = std::fs::File::create(&err_log) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&err_log)
+        {
+            let _ = writeln!(f, "--- dsh web spawn ---");
             for line in BufReader::new(stderr).lines().flatten() {
                 let _ = writeln!(f, "{}", line);
             }

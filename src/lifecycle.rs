@@ -95,6 +95,12 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
             // non-zero on warnings or a failed postinstall while the package is
             // still functional. Decide by whether bin.js actually landed.
             installed = runtime.installed_version();
+            // Warm up dsh's profile (junctions, config) so the first launch
+            // doesn't fail on the profile boot.
+            if runtime.is_installed() {
+                status(&proxy, "正在初始化 DSH…", "首次启动前预加载，请稍候。", &[]);
+                runtime.prewarm(INSTALL_TIMEOUT);
+            }
             if !runtime.is_installed() {
                 let detail = match result {
                     Some(out) => {
