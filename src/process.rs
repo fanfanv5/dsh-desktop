@@ -136,12 +136,37 @@ impl Drop for Job {
     }
 }
 
-/// Spawn dsh web and start reader threads for its stdout/stderr.
+/// Spawn dsh web, waiting (with retries) for it to print its URL.
 ///
-/// On success the dsh URL is sent as a UiEvent::Ready from the stdout reader
-/// thread once dsh prints it. The pid and job-assignment result are recorded in
-/// state for cleanup.
+/// The first launch right after a fresh install can transiently fail while dsh
+/// sets up its profile (junctions, caches, etc.); re-spawn automatically so the
+/// user never has to close and reopen the app.
 pub fn spawn_dsh(
+    node: &Path,
+    bin_js: &Path,
+    log_dir: &Path,
+    proxy: Proxy,
+    job: &Job,
+    state: &ProcessState,
+) -> std::io::Result<u32> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        match spawn_once(node, bin_js, log_dir, proxy.clone(), job, state) {
+            Ok(pid) => return Ok(pid),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "dsh web failed to start after retries")
+    }))
+}
+
+/// Spawn dsh web once and wait (up to 15s) for it to print its URL.
+fn spawn_once(
     node: &Path,
     bin_js: &Path,
     log_dir: &Path,
@@ -184,6 +209,8 @@ pub fn spawn_dsh(
     *state.pid.lock().unwrap() = Some(pid);
     state.assigned.store(job.assign(pid), Ordering::Relaxed);
 
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
     // stdout reader: parse the printed URL, keep draining to a log.
     let out_log = log_dir.join("dsh-web.out.log");
     let out_proxy = proxy;
@@ -197,17 +224,12 @@ pub fn spawn_dsh(
             if !ready {
                 if let Some(url) = parse_url(&line) {
                     ready = true;
+                    let _ = ready_tx.send(());
                     let _ = out_proxy.send_event(UiEvent::Ready { url });
                 }
             }
         }
-        if !ready {
-            let _ = out_proxy.send_event(UiEvent::Status {
-                title: "启动失败".into(),
-                detail: format!("dsh web 进程意外退出。日志：{}", out_log.display()),
-                actions: vec!["retry".into()],
-            });
-        }
+        // EOF: dropping ready_tx signals "exited before ready" to the waiter.
     });
 
     // stderr reader: drain to a log for diagnostics.
@@ -220,7 +242,18 @@ pub fn spawn_dsh(
         }
     });
 
-    Ok(pid)
+    // Wait for dsh to announce its URL. If it exits first (or takes too long),
+    // kill whatever is left and signal the caller to retry.
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(()) => Ok(pid),
+        Err(_) => {
+            job.kill_all(pid);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "dsh web exited before printing its URL",
+            ))
+        }
+    }
 }
 
 /// Extract the loopback URL from dsh's startup line
