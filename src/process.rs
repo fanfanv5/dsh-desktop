@@ -210,26 +210,46 @@ fn log_spawn_context(log_dir: &Path, profile_fallback: &Path, attempt: u32) {
         .unwrap_or(false);
     let _ = writeln!(f, "junction-audit: count={} timer-link+target={}", names.len(), sample_ok);
     // Token + ACL view of the exact package dir the loader must read through.
-    let target = profile_fallback
-        .join("@deepseek-ai")
-        .join("cordis-plugin-timer")
-        .to_string_lossy()
-        .into_owned();
-    let _ = writeln!(f, "--- whoami ---");
-    let script = format!("whoami /user & whoami /groups & icacls \"{}\"", target);
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.arg("/c").arg(script);
-    // Hide the console: this app is GUI-subsystem, so a bare cmd child would
-    // flash a window on every spawn attempt.
+    // Windows-only: it shells out through cmd; other platforms have no ACL
+    // story and no cmd to run.
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let target = profile_fallback
+            .join("@deepseek-ai")
+            .join("cordis-plugin-timer")
+            .to_string_lossy()
+            .into_owned();
+        let _ = writeln!(f, "--- whoami ---");
+        let script = format!("whoami /user & whoami /groups & icacls \"{}\"", target);
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/c").arg(script);
+        // Hide the console: this app is GUI-subsystem, so a bare cmd child would
+        // flash a window on every spawn attempt.
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        if let Ok(out) = cmd.output() {
+            let _ = f.write_all(&out.stdout);
+            let _ = f.write_all(&out.stderr);
+        }
     }
-    if let Ok(out) = cmd.output() {
-        let _ = f.write_all(&out.stdout);
-        let _ = f.write_all(&out.stderr);
-    }
+}
+
+/// Unix: wrap the `node <bin> web --port 0` launch in a tiny /bin/sh watchdog
+/// so the child dies with this app even when we are SIGTERM/SIGKILLed (or
+/// crash) and the cleanup path never runs — Unix has no Job Object
+/// equivalent. The wrapper polls its parent ($PPID is this app) once a
+/// second. stdout/stderr still flow through unchanged.
+#[cfg(unix)]
+pub fn watchdog_command(node: &Path, bin_js: &Path) -> Command {
+    let node = node.to_string_lossy().replace('\'', r"'\''");
+    let bin = bin_js.to_string_lossy().replace('\'', r"'\''");
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(format!(
+        "'{node}' '{bin}' web --port 0 & C=$!; trap 'kill $C' TERM INT; while kill -0 $PPID 2>/dev/null && kill -0 $C 2>/dev/null; do sleep 1; done; kill $C 2>/dev/null"
+    ));
+    cmd
 }
 
 /// Spawn dsh web once and wait (up to `wait` total) for it to print its URL.
@@ -247,9 +267,13 @@ fn spawn_once(
     state: &ProcessState,
     wait: Duration,
 ) -> std::io::Result<u32> {
+    #[cfg(unix)]
+    let mut cmd = watchdog_command(node, bin_js);
+    #[cfg(not(unix))]
     let mut cmd = Command::new(node);
-    cmd.arg(bin_js)
-        .arg("web")
+    #[cfg(not(unix))]
+    cmd.arg(bin_js);
+    cmd.arg("web")
         .arg("--port")
         .arg("0")
         .stdin(Stdio::null())

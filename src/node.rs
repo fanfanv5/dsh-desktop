@@ -32,10 +32,60 @@ pub fn detect_node() -> Option<NodeEnv> {
 
     #[cfg(not(windows))]
     {
-        let node = find_on_path("node")?;
-        let npm = find_on_path("npm")?;
+        let node = find_node_unix()?;
+        let npm = find_npm_unix(&node)?;
         Some(NodeEnv { node, npm_cli: npm })
     }
+}
+
+/// Find node on Unix: PATH first, then the common install locations that a
+/// GUI launch (Finder / .app bundle) can't see because its PATH is only
+/// /usr/bin:/bin:/usr/sbin:/sbin. Covers Homebrew (arm + intel), the macOS
+/// pkg installer, Volta, and nvm (newest installed version).
+#[cfg(not(windows))]
+fn find_node_unix() -> Option<PathBuf> {
+    if let Some(node) = find_on_path("node") {
+        return Some(node);
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/opt/homebrew/bin"), // Homebrew on Apple Silicon
+        PathBuf::from("/usr/local/bin"),    // Homebrew on Intel / nodejs pkg installer
+    ];
+    if let Some(home) = &home {
+        candidates.push(home.join(".volta").join("bin"));
+        // nvm keeps one dir per version; pick the lexicographically largest
+        // (v20.10.0 > v9.11.2 for real-world version strings of the same era).
+        let nvm = home.join(".nvm").join("versions").join("node");
+        let mut versions: Vec<_> = std::fs::read_dir(&nvm)
+            .map(|rd| rd.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        versions.sort();
+        for v in versions.iter().rev() {
+            candidates.push(nvm.join(v).join("bin"));
+        }
+    }
+    for dir in candidates {
+        let candidate = dir.join("node");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Find npm next to a resolved node, falling back to a PATH lookup. npm
+/// usually sits in the same dir as node (Homebrew, Volta, nvm all symlink
+/// both), so this survives GUI launches with a stripped PATH.
+#[cfg(not(windows))]
+fn find_npm_unix(node: &std::path::Path) -> Option<PathBuf> {
+    if let Some(dir) = node.parent() {
+        let beside = dir.join("npm");
+        if beside.is_file() {
+            return Some(beside);
+        }
+    }
+    find_on_path("npm")
 }
 
 /// `std::fs::canonicalize` returns a verbatim path on Windows

@@ -90,12 +90,25 @@ impl Runtime {
         use std::io::{BufRead, BufReader};
         use std::sync::mpsc;
 
+        #[cfg(unix)]
+        // Same watchdog as the real spawn: if the app dies mid-prewarm, the
+        // dsh web child must not be orphaned.
+        let mut cmd = crate::process::watchdog_command(&self.node, &self.bin_js());
+        #[cfg(not(unix))]
         let mut cmd = Command::new(&self.node);
+        #[cfg(not(unix))]
         cmd.arg(self.bin_js()).arg("web").arg("--port").arg("0");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Own process group so the teardown below can kill the watchdog
+            // AND the node child together.
+            cmd.process_group(0);
         }
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = cmd.spawn() else { return };
@@ -112,6 +125,12 @@ impl Runtime {
             }
         });
         let _ = rx.recv_timeout(timeout);
+        // Kill the whole group (watchdog + node); killing only the watchdog
+        // would leave node running until it notices the parent is gone.
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
         let _ = child.kill();
         let _ = child.wait();
     }

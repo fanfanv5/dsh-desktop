@@ -6,3 +6,4 @@
 cargo-smoke/
 node_modules/
 *.log
+.DS_Store

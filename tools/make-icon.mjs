@@ -167,8 +167,32 @@ function ico(frames) {
   return Buffer.concat([out, ...blobs]);
 }
 
+// --- .icns (Apple icon) with PNG-compressed entries ---
+// Modern macOS accepts PNG payloads for every icon type; the size-tagged
+// types cover the dock/Finder set including @2x variants.
+function icns(entries) {
+  // Entry: [type, pngBuffer]. Header: magic "icns" + total file length.
+  const body = Buffer.concat(entries.map(([type, buf]) => {
+    const head = Buffer.alloc(8);
+    head.write(type, 0, "ascii");
+    head.writeUInt32BE(buf.length + 8, 4);
+    return Buffer.concat([head, buf]);
+  }));
+  const head = Buffer.alloc(8);
+  head.write("icns", 0, "ascii");
+  head.writeUInt32BE(body.length + 8, 4);
+  return Buffer.concat([head, body]);
+}
+
 const root = path.resolve(import.meta.dirname, "..");
 const sizes = [16, 24, 32, 48, 64, 128, 256];
 fs.writeFileSync(path.join(root, "assets", "dsh-desktop.ico"), ico(sizes.map((s) => [s, dibFrame(s, render(s, BRAND))])));
 fs.writeFileSync(path.join(root, "assets", "icon-64.rgba"), render(64, BRAND));
-console.log("assets/dsh-desktop.ico and assets/icon-64.rgba regenerated");
+// icns type codes (one entry each; macOS derives @1x/@2x from the type):
+// ic11=32, ic12=64, ic07=128, ic08=256, ic09=512, ic10=1024.
+const icnsSizes = [[32, "ic11"], [64, "ic12"], [128, "ic07"], [256, "ic08"], [512, "ic09"], [1024, "ic10"]];
+fs.writeFileSync(
+  path.join(root, "assets", "dsh-desktop.icns"),
+  icns(icnsSizes.map(([s, type]) => [type, png(s, s, render(s, BRAND))])),
+);
+console.log("assets/dsh-desktop.ico, assets/icon-64.rgba and assets/dsh-desktop.icns regenerated");

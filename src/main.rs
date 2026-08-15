@@ -81,6 +81,24 @@ fn main() {
         }
     }
 
+    // Single instance (Unix): an exclusive flock on a lock file in the app
+    // data dir — same purpose as the Windows mutex above. The fd is
+    // intentionally leaked; the OS drops the lock at process exit, including
+    // on crash. Best-effort: if the lock file can't be opened, continue.
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let lock = paths::AppPaths::resolve().logs.join(".instance.lock");
+        // First run: the dir doesn't exist yet; create it so the lock works.
+        let _ = std::fs::create_dir_all(lock.parent().unwrap_or(std::path::Path::new(".")));
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).write(true).open(&lock) {
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                std::process::exit(0);
+            }
+            std::mem::forget(f);
+        }
+    }
+
     let paths = paths::AppPaths::resolve();
     let _ = paths.ensure();
 
@@ -90,23 +108,83 @@ fn main() {
     let event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
+    // macOS: an app without a main menu gets no key equivalents — WKWebView's
+    // Cmd+C/V/Z/A ride on the menu system (performKeyEquivalent → validate),
+    // so a bare tao window can't even copy/paste. Install a minimal native
+    // menu of predefined items; the webview is the only "document", so no
+    // custom actions are needed. The Menu is leaked: NSApp retains the NSMenu,
+    // but keeping the Rust wrapper alive is harmless and avoids relying on
+    // platform-specific drop semantics.
+    #[cfg(target_os = "macos")]
+    {
+        use muda::{Menu, PredefinedMenuItem, Submenu};
+        let app_submenu = Submenu::new("DSH Desktop", true);
+        let _ = app_submenu.append_items(&[
+            &PredefinedMenuItem::about(Some("DSH Desktop"), None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::hide(None),
+            &PredefinedMenuItem::hide_others(None),
+            &PredefinedMenuItem::show_all(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::quit(None),
+        ]);
+        let edit_submenu = Submenu::new("Edit", true);
+        let _ = edit_submenu.append_items(&[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ]);
+        let window_submenu = Submenu::new("Window", true);
+        let _ = window_submenu.append_items(&[
+            &PredefinedMenuItem::minimize(None),
+            &PredefinedMenuItem::maximize(None),
+            &PredefinedMenuItem::fullscreen(None),
+        ]);
+        let menu = Menu::new();
+        let _ = menu.append_items(&[&app_submenu, &edit_submenu, &window_submenu]);
+        menu.init_for_nsapp();
+        std::mem::forget(menu);
+    }
+
     // Start hidden to avoid a white flash while WebView2 initializes; the
     // window is revealed after the first presented frame (see below).
-    let window = WindowBuilder::new()
+    // `mut` only for the macOS chrome chaining below; on other targets the
+    // builder is never reassigned.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut builder = WindowBuilder::new()
         .with_visible(false)
         // Same product name the dsh web UI shows; avoids an obvious title
         // change when the webview loads.
         .with_title("DeepSeek Harness")
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(tao::dpi::LogicalSize::new(720.0, 520.0))
-        .with_window_icon(load_icon())
-        .build(&event_loop)
-        .expect("failed to build window");
+        .with_window_icon(load_icon());
+    // macOS: transparent titlebar with fullsize content view — the content
+    // extends under the (still native) traffic lights, like VS Code/Telegram.
+    // The injected header strip provides the drag surface; the traffic lights
+    // themselves stay native, so no in-page window buttons are needed there.
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::WindowBuilderExtMacOS;
+        builder = builder
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true);
+    }
+    let window = builder.build(&event_loop).expect("failed to build window");
 
     // Paint the native chrome in the content's colors BEFORE anything is
     // shown: at double-click launch the frame and the page must already match.
     #[cfg(windows)]
     let dark = system_prefers_dark();
+    #[cfg(target_os = "macos")]
+    let dark = system_prefers_dark();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let dark = false;
     #[cfg(windows)]
     apply_window_chrome(&window, dark);
     // Borderless: the in-page header bar (injected below) replaces the
@@ -118,10 +196,7 @@ fn main() {
         borderless::apply(HWND(window.hwnd() as *mut _));
     }
     // dsh's bg-base token: #f9fafb light / #151517 dark.
-    #[cfg(windows)]
     let webview_bg: wry::RGBA = if dark { (21, 21, 23, 255) } else { (249, 250, 251, 255) };
-    #[cfg(not(windows))]
-    let webview_bg: wry::RGBA = (249, 250, 251, 255);
 
     let webview = WebViewBuilder::new()
         .with_html(init_ui::INIT_HTML)
@@ -134,6 +209,12 @@ fn main() {
         // injects the in-page header bar (window controls) on every page.
         .with_initialization_script(
             r#"
+// Platform token substituted by Rust at startup: 'mac' or 'win'. On macOS
+// the window keeps its native traffic lights (over a transparent titlebar),
+// so the injected header is a drag-only strip; on Windows it carries the
+// min/max/close buttons because the native caption is removed.
+var IS_MAC = '@@PLATFORM@@' === 'mac';
+var HDR_H = IS_MAC ? 28 : 36;
 window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => requestAnimationFrame(() => { try { window.ipc.postMessage('__visible'); } catch (e) {} })));
 (function () {
   function ipc(m) { try { window.ipc.postMessage(m); } catch (e) {} }
@@ -157,6 +238,14 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
   var headerDone = false, headerBar = null;
   function updateHeaderColor() {
     if (!headerBar) return;
+    // macOS: the strip is fully transparent everywhere — both the sidebar
+    // and the content column are padded down (not margined), so their own
+    // backgrounds extend to the top of the window and show through the
+    // strip. Colors match by construction; nothing to guess.
+    if (IS_MAC) {
+      headerBar.style.background = 'transparent';
+      return;
+    }
     // dsw static palette is stable across pages/themes; the alias vars get
     // redefined by the dsh theme layer at runtime.
     var dark = document.body && document.body.hasAttribute('data-ds-dark-theme');
@@ -176,39 +265,56 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
     headerBar = document.createElement('div');
     headerBar.id = 'dsh-desktop-header';
     // No title: the dsh sidebar carries its own logo at the top; the bar is
-    // purely a drag surface + window controls.
+    // purely a drag surface + (Windows only) window controls.
     headerBar.setAttribute('style',
-      'position:fixed;top:0;left:0;right:0;height:36px;z-index:2147483647;display:flex;align-items:stretch;justify-content:flex-end');
-    var right = document.createElement('div');
-    right.setAttribute('style', 'display:flex;height:100%');
-    var iconMin = '<svg width="10" height="10" viewBox="0 0 10 10"><rect y="4.5" width="10" height="1" fill="currentColor"/></svg>';
-    var iconMax = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>';
-    var iconClose = '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.1"/></svg>';
-    function makeButton(icon, action) {
-      var b = document.createElement('div');
-      b.className = 'dsh-winbtn';
-      b.innerHTML = icon;
-      b.setAttribute('style', 'width:46px;height:100%;display:flex;align-items:center;justify-content:center;cursor:default;color:var(--dsw-alias-label-secondary,var(--label-secondary,#61666b))');
-      var close = action === 'close';
-      b.addEventListener('mouseenter', function () {
-        b.style.background = close ? '#e81123' : 'rgba(128,128,128,.15)';
-        if (close) b.style.color = '#fff';
+      'position:fixed;top:0;left:' + (IS_MAC ? '78' : '0') + 'px;right:0;height:' + HDR_H + 'px;z-index:2147483647;display:flex;align-items:stretch;justify-content:flex-end' + (IS_MAC ? ';cursor:grab' : ''));
+    if (!IS_MAC) {
+      var right = document.createElement('div');
+      right.setAttribute('style', 'display:flex;height:100%');
+      var iconMin = '<svg width="10" height="10" viewBox="0 0 10 10"><rect y="4.5" width="10" height="1" fill="currentColor"/></svg>';
+      var iconMax = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>';
+      var iconClose = '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.1"/></svg>';
+      function makeButton(icon, action) {
+        var b = document.createElement('div');
+        b.className = 'dsh-winbtn';
+        b.innerHTML = icon;
+        b.setAttribute('style', 'width:46px;height:100%;display:flex;align-items:center;justify-content:center;cursor:default;color:var(--dsw-alias-label-secondary,var(--label-secondary,#61666b))');
+        var close = action === 'close';
+        b.addEventListener('mouseenter', function () {
+          b.style.background = close ? '#e81123' : 'rgba(128,128,128,.15)';
+          if (close) b.style.color = '#fff';
+        });
+        b.addEventListener('mouseleave', function () {
+          b.style.background = 'transparent';
+          b.style.color = 'var(--dsw-alias-label-secondary,var(--label-secondary,#61666b))';
+        });
+        b.addEventListener('click', function (e) { e.stopPropagation(); window.__dshDesktop[action](); });
+        return b;
+      }
+      right.appendChild(makeButton(iconMin, 'minimize'));
+      right.appendChild(makeButton(iconMax, 'toggleMaximize'));
+      right.appendChild(makeButton(iconClose, 'close'));
+      headerBar.appendChild(right);
+    } else {
+      // macOS: native traffic lights already sit at the top-left, above the
+      // webview; double-click anywhere on the strip zooms, like a real titlebar.
+      headerBar.addEventListener('dblclick', function (e) {
+        if (e.button === 0) window.__dshDesktop.toggleMaximize();
       });
-      b.addEventListener('mouseleave', function () {
-        b.style.background = 'transparent';
-        b.style.color = 'var(--dsw-alias-label-secondary,var(--label-secondary,#61666b))';
-      });
-      b.addEventListener('click', function (e) { e.stopPropagation(); window.__dshDesktop[action](); });
-      return b;
     }
-    right.appendChild(makeButton(iconMin, 'minimize'));
-    right.appendChild(makeButton(iconMax, 'toggleMaximize'));
-    right.appendChild(makeButton(iconClose, 'close'));
-    headerBar.appendChild(right);
     // Drag anywhere on the bar (buttons excepted); the native NC drag loop
     // also gives double-click-to-maximize and Aero snap for free.
     headerBar.addEventListener('mousedown', function (e) {
-      if (e.button === 0 && !e.target.closest('.dsh-winbtn')) window.__dshDesktop.startDrag();
+      if (e.button === 0 && !e.target.closest('.dsh-winbtn')) {
+        if (IS_MAC) {
+          headerBar.style.cursor = 'grabbing';
+          window.addEventListener('mouseup', function reset() {
+            headerBar.style.cursor = 'grab';
+            window.removeEventListener('mouseup', reset);
+          });
+        }
+        window.__dshDesktop.startDrag();
+      }
     });
   }
   function installHeader() {
@@ -220,11 +326,11 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
       document.body.appendChild(headerBar);
       updateHeaderColor();
       document.documentElement.style.boxSizing = 'border-box';
-      document.documentElement.style.paddingTop = '36px';
+      document.documentElement.style.paddingTop = HDR_H + 'px';
       return;
     }
     // dsh page: the sidebar goes full-height (its logo reaches the very
-    // top); only the content column is pushed below the 36px bar, which
+    // top); only the content column is pushed below the header bar, which
     // floats over the content area only — its left edge tracks the sidebar
     // width (resize/collapse included, via ResizeObserver).
     var tries = 0;
@@ -246,10 +352,22 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
         document.body.appendChild(headerBar);
         updateHeaderColor();
         document.documentElement.style.boxSizing = 'border-box';
-        document.documentElement.style.paddingTop = '36px';
+        document.documentElement.style.paddingTop = HDR_H + 'px';
         return;
       }
-      main.style.marginTop = '36px';
+      if (IS_MAC) {
+        // macOS: only the sidebar is padded down (its top-left sits under the
+        // native traffic lights); the content column runs to the very top —
+        // no dead space. The drag strip is transparent (updateHeaderColor),
+        // so the colors seen through it are always the page's own.
+        sidebarCol.style.boxSizing = 'border-box';
+        sidebarCol.style.paddingTop = HDR_H + 'px';
+        buildStrip();
+        document.body.appendChild(headerBar);
+        updateHeaderColor();
+        return;
+      }
+      main.style.marginTop = HDR_H + 'px';
       buildStrip();
       headerBar.dataset.mode = 'content';
       var syncLeft = function () {
@@ -273,7 +391,8 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
   document.addEventListener('DOMContentLoaded', function () { startTheme(); installHeader(); });
   setTimeout(function () { startTheme(); installHeader(); }, 0);
 })();
-"#,
+"#
+            .replace("@@PLATFORM@@", if cfg!(target_os = "macos") { "mac" } else { "win" }),
         )
         .with_ipc_handler({
             let proxy = proxy.clone();
@@ -332,6 +451,12 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
                         use windows::Win32::Foundation::HWND;
                         borderless::begin_drag(HWND(window.hwnd() as *mut _));
                     }
+                    // macOS: tao synthesizes a left-mouse-down event from the
+                    // current event and enters the native drag loop.
+                    #[cfg(not(windows))]
+                    {
+                        let _ = window.drag_window();
+                    }
                 } else if body.contains("__win:close") {
                     // Same path as CloseRequested: hide first, then teardown.
                     let _ = window.set_visible(false);
@@ -366,6 +491,19 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
             _ => {}
         }
     });
+}
+
+/// The system's apps color scheme on macOS: `defaults read -g
+/// AppleInterfaceStyle` prints "Dark" in dark mode and fails (key absent) in
+/// light mode. Only used to pick the webview's pre-paint background color so
+/// the first frame matches the page; WKWebView itself follows the system.
+#[cfg(target_os = "macos")]
+fn system_prefers_dark() -> bool {
+    std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "Dark")
+        .unwrap_or(false)
 }
 
 /// The system's apps color scheme (the same signal Chromium/WebView2 uses for

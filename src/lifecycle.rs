@@ -88,7 +88,7 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
 
         // 2. Install if missing.
         if !runtime.is_installed() {
-            status(&proxy, "Installing @deepseek-ai/dsh…", "正在下载并安装，可能需要一两分钟，请稍候。", &[]);
+            status(&proxy, "Installing @deepseek-ai/dsh…", "正在下载并安装（500+ 个包，视网速可能需要几分钟到十几分钟），请耐心等待，不要关闭窗口。", &[]);
             let result = runtime.install_latest(INSTALL_TIMEOUT);
             log_output(&paths.logs, "install.log", &result);
             // npm's exit code is not a reliable success signal: it can exit
