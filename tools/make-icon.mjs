@@ -40,7 +40,8 @@ function png(w, h, rgba) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
 }
 function parsePath(d) {
-  const toks = d.match(/[MCZ]|-?\d+(?:\.\d+)?(?:e-?\d+)?/g) || [];
+  // Numbers may omit the leading zero (".53418"), so accept both forms.
+  const toks = d.match(/[MCZ]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g) || [];
   const subs = [];
   let cur = null, start = null, i = 0;
   while (i < toks.length) {
@@ -75,8 +76,12 @@ function parsePath(d) {
   return subs;
 }
 function render(size, hex) {
-  const SS = 4, N = size * SS, scale = N / 50;
-  const subs = parsePath(WHALE_D).map((pts) => pts.map((p) => ({ x: p.x * scale, y: p.y * scale })));
+  const SS = 4, N = size * SS;
+  // The whale path fills its 50x50 viewBox edge to edge; rendering it full
+  // bleed clips the anti-aliased boundary pixels (the tail touches x=50).
+  // Inset to 86% and center so the whole silhouette survives.
+  const PAD = 0.07, scale = N * (1 - 2 * PAD) / 50, off = N * PAD;
+  const subs = parsePath(WHALE_D).map((pts) => pts.map((p) => ({ x: p.x * scale + off, y: p.y * scale + off })));
   const cov = new Float32Array(size * size);
   const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   const edges = [];
