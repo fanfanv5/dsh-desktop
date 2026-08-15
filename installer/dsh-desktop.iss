@@ -2,7 +2,7 @@
 ; Build with: ISCC.exe dsh-desktop.iss
 
 #define AppName "DSH Desktop"
-#define AppVersion "0.1.0"
+#define AppVersion "1.0.0"
 #define AppExeName "dsh-desktop.exe"
 
 [Setup]

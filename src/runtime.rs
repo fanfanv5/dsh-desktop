@@ -76,9 +76,11 @@ impl Runtime {
     /// Run a full `dsh web --port 0` boot once and wait for it to print its
     /// URL, then kill it. This settles the ~/.dsh profile junctions AND warms
     /// the module import cache, so the first real launch doesn't race them.
-    /// Best-effort: failures are ignored here and recovered by the spawn retry
-    /// loop instead.
-    pub fn prewarm(&self, _timeout: Duration) {
+    /// The wait budget is caller-controlled: right after a fresh install,
+    /// antivirus scanning can make this boot take minutes, so give it several
+    /// minutes there. Best-effort: failures are ignored here and recovered by
+    /// the spawn retry loop instead.
+    pub fn prewarm(&self, timeout: Duration) {
         use std::io::{BufRead, BufReader};
         use std::sync::mpsc;
 
@@ -101,7 +103,7 @@ impl Runtime {
                 }
             }
         });
-        let _ = rx.recv_timeout(Duration::from_secs(60));
+        let _ = rx.recv_timeout(timeout);
         let _ = child.kill();
         let _ = child.wait();
     }

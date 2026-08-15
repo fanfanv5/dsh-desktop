@@ -66,7 +66,7 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
 
     'outer: loop {
         // 1. Detect Node.js.
-        status(&proxy, "正在检测 Node.js…", "", &[]);
+        status(&proxy, "Detecting Node.js…", "", &[]);
         let node_env = match detect_node() {
             Some(n) => n,
             None => {
@@ -88,7 +88,7 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
 
         // 2. Install if missing.
         if !runtime.is_installed() {
-            status(&proxy, "首次安装 @deepseek-ai/dsh…", "正在下载并安装，可能需要一两分钟，请稍候。", &[]);
+            status(&proxy, "Installing @deepseek-ai/dsh…", "正在下载并安装，可能需要一两分钟，请稍候。", &[]);
             let result = runtime.install_latest(INSTALL_TIMEOUT);
             log_output(&paths.logs, "install.log", &result);
             // npm's exit code is not a reliable success signal: it can exit
@@ -98,8 +98,15 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
             // Warm up dsh's profile (junctions, config) so the first launch
             // doesn't fail on the profile boot.
             if runtime.is_installed() {
-                status(&proxy, "正在初始化 DSH…", "首次启动前预加载，请稍候。", &[]);
-                runtime.prewarm(INSTALL_TIMEOUT);
+                status(
+                    &proxy,
+                    "Initializing DSH…",
+                    "首次启动前预加载（杀毒软件扫描可能导致首次启动需要几分钟），请稍候。",
+                    &[],
+                );
+                // Long budget: this prewarm absorbs the slow first boot
+                // (antivirus scan) so the real launch afterwards is fast.
+                runtime.prewarm(Duration::from_secs(300));
             }
             if !runtime.is_installed() {
                 let detail = match result {
@@ -122,7 +129,7 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
         let current = installed.unwrap_or_else(|| "未知".to_string());
 
         // 3. Check for updates.
-        status(&proxy, "正在检测更新…", "", &[]);
+        status(&proxy, "Checking for updates…", "", &[]);
         if let Some(latest) = runtime.latest_version(VIEW_TIMEOUT) {
             if latest != current {
                 status(
@@ -133,7 +140,7 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
                 );
                 match wait_command(&rx) {
                     Some(Command::Upgrade) => {
-                        status(&proxy, "正在升级…", &format!("正在升级到 {}，请稍候。", latest), &[]);
+                        status(&proxy, "Upgrading…", &format!("正在升级到 {}，请稍候。", latest), &[]);
                         let up = runtime.install_latest(INSTALL_TIMEOUT);
                         log_output(&paths.logs, "upgrade.log", &up);
                         // Fall through and start whatever is now installed.
@@ -145,8 +152,16 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
         }
 
         // 4. Spawn dsh web.
-        status(&proxy, "正在启动 DSH…", "", &[]);
-        match spawn_dsh(&node_env.node, &runtime.bin_js(), &paths.logs, proxy.clone(), &job, &state) {
+        status(&proxy, "Starting DSH…", "", &[]);
+        match spawn_dsh(
+            &node_env.node,
+            &runtime.bin_js(),
+            &paths.logs,
+            &dsh_profile_fallback(),
+            proxy.clone(),
+            &job,
+            &state,
+        ) {
             Ok(_) => {
                 // The Ready event is delivered by the stdout reader thread; the
                 // dsh process keeps running independently. Stay alive so that a
@@ -168,4 +183,17 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
             }
         }
     }
+}
+
+/// Mirror dsh's home resolution: $DSH_HOME overrides, else ~/.dsh.
+fn dsh_profile_fallback() -> std::path::PathBuf {
+    let home = std::env::var_os("DSH_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+        });
+    home.join(".dsh").join("profiles").join("node_modules")
 }
