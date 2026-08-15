@@ -185,12 +185,114 @@ pub fn spawn_dsh(
         log_spawn_context(log_dir, profile_fallback, attempt);
         match spawn_once(node, bin_js, log_dir, proxy.clone(), job, state, wait) {
             Ok(pid) => return Ok(pid),
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                last_err = Some(e);
+                // dsh's loader rolls back the whole boot when a single plugin
+                // entry fails to import — there is no built-in skip. Disable
+                // the offending entry in the user's patch layer so the next
+                // attempt boots without it, and say so on the init screen.
+                if let Some(id) = disable_failed_loader_entry(log_dir, profile_fallback) {
+                    let _ = proxy.send_event(UiEvent::Status {
+                        title: "跳过故障插件，正在重试…".to_string(),
+                        detail: format!(
+                            "插件 {} 加载失败，已在 cordis.patch.yml 中自动禁用。修复插件后删掉那一行的 disabled 即可恢复。",
+                            id
+                        ),
+                        actions: vec![],
+                    });
+                }
+            }
         }
     }
     Err(last_err.unwrap_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::Other, "dsh web failed to start after retries")
     }))
+}
+
+/// Auto-recover from a fatal loader-entry failure. dsh's loader rolls back
+/// the WHOLE boot when a single plugin entry fails to import (no built-in
+/// skip), so one broken plugin bricks the app. Here we disable the offending
+/// entry in the user's cordis.patch.yml (profile level first, then home
+/// level) so the next spawn attempt boots without it. Returns the entry id.
+/// Capped at 5 entries per process so a systemic failure never guts the
+/// whole config silently.
+fn disable_failed_loader_entry(log_dir: &Path, profile_fallback: &Path) -> Option<String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static DISABLED: AtomicUsize = AtomicUsize::new(0);
+    if DISABLED.load(Ordering::Relaxed) >= 5 {
+        return None;
+    }
+    let err_text = read_tail(&log_dir.join("dsh-web.err.log"), 128 * 1024)?;
+    // The loader's fatal message, e.g.
+    // "failed to import loader entry tool-ocr (/path/to/plugin): ..."
+    const MARKER: &str = "failed to import loader entry ";
+    let pos = err_text.rfind(MARKER)?;
+    let id: String = err_text[pos + MARKER.len()..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '(' && *c != ':')
+        .collect();
+    if id.is_empty() {
+        return None;
+    }
+    let dsh_home = profile_fallback.parent()?.parent()?.to_path_buf();
+    let candidates = [
+        dsh_home.join("profiles").join("web").join("cordis.patch.yml"),
+        dsh_home.join("cordis.patch.yml"),
+    ];
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        if let Some(patched) = insert_disabled(&text, &id) {
+            if std::fs::write(&path, patched).is_ok() {
+                DISABLED.fetch_add(1, Ordering::Relaxed);
+                return Some(id);
+            }
+        } else if text.contains(&format!("id: {}", id)) || text.contains(&format!("id: '{}'", id)) {
+            // The entry exists but is already disabled (previous recovery).
+            return None;
+        }
+    }
+    None
+}
+
+/// Insert `disabled: true` under the patch entry whose `- id:` line matches
+/// `id` (plain or quoted), keeping the entry's indentation. Returns None
+/// when no matching entry line exists.
+fn insert_disabled(text: &str, id: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let idx = lines.iter().position(|l| {
+        let t = l.trim_start();
+        t == format!("- id: {id}")
+            || t == format!("- id: '{id}'")
+            || t == format!("- id: \"{id}\"")
+    })?;
+    if lines.get(idx + 1).map(|l| l.contains("disabled:")).unwrap_or(false) {
+        return None; // already disabled
+    }
+    let indent = lines[idx].len() - lines[idx].trim_start().len();
+    let mut out = String::with_capacity(text.len() + 32);
+    for (n, line) in lines.iter().enumerate() {
+        out.push_str(line);
+        out.push('\n');
+        if n == idx {
+            out.push_str(&" ".repeat(indent + 2));
+            out.push_str("disabled: true # auto-disabled by DSH Desktop: plugin failed to load\n");
+        }
+    }
+    Some(out)
+}
+
+/// Read at most the last `max` bytes of a file (as UTF-8, lossy on cut
+/// boundaries is fine for our grep-style scanning).
+fn read_tail(path: &Path, max: usize) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len() as usize;
+    if len > max {
+        f.seek(SeekFrom::Start((len - max) as u64)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Append a per-attempt context snapshot (cwd, environment, junction audit) to
@@ -441,5 +543,35 @@ mod tests {
     fn non_http_url_is_none() {
         assert_eq!(parse_url("dsh web: https://127.0.0.1:62958"), None);
         assert_eq!(parse_url("dsh web: "), None);
+    }
+
+    use super::insert_disabled;
+
+    const PATCH: &str = "other:\n  - id: mcp-a\n    name: x\n- insert:\n    - id: tool-ocr\n      name: '/p/dsh-tool-ocr'\n    - id: mcp-b\n      name: y\n";
+
+    #[test]
+    fn insert_disabled_targets_matching_entry() {
+        let out = insert_disabled(PATCH, "tool-ocr").unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        let i = lines.iter().position(|l| l.trim_start() == "- id: tool-ocr").unwrap();
+        assert_eq!(lines[i + 1].trim(), "disabled: true # auto-disabled by DSH Desktop: plugin failed to load");
+        // indent follows the entry (4 spaces + 2)
+        assert!(lines[i + 1].starts_with("      disabled"));
+        // siblings untouched
+        assert!(out.contains("- id: mcp-b"));
+    }
+
+    #[test]
+    fn insert_disabled_accepts_quoted_ids() {
+        let y = "- insert:\n    - id: 'weird id'\n      name: z\n";
+        assert!(insert_disabled(y, "weird id").is_some());
+    }
+
+    #[test]
+    fn insert_disabled_skips_missing_and_existing() {
+        assert!(insert_disabled(PATCH, "no-such-entry").is_none());
+        let once = insert_disabled(PATCH, "tool-ocr").unwrap();
+        // second run must not double-insert
+        assert!(insert_disabled(&once, "tool-ocr").is_none());
     }
 }
