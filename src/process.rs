@@ -155,10 +155,23 @@ pub fn spawn_dsh(
     const MAX_ATTEMPTS: u32 = 6;
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..MAX_ATTEMPTS {
+        // Surface retry progress: without this the init screen sits on a
+        // static "Starting DSH…" for minutes while attempts churn.
+        let _ = proxy.send_event(UiEvent::Status {
+            title: "Starting DSH…".to_string(),
+            detail: format!("启动尝试 {}/{}，失败详情见 logs/dsh-web.err.log", attempt + 1, MAX_ATTEMPTS),
+            actions: vec![],
+        });
         if attempt > 0 {
-            // The dir holds only junctions that dsh's boot re-creates
-            // (healProfilesModuleFallback); wiping it between attempts forces
-            // a clean rebuild instead of retrying against a corrupted link set.
+            // The dir holds only links that dsh's boot re-creates
+            // (healProfilesModuleFallback) — wiping it between attempts forces
+            // a clean rebuild instead of retrying against a corrupted link
+            // set. Windows-only: there the links are junctions and the heal
+            // always runs. On Unix dsh only re-links after a boot that gets
+            // past the loader phase, so wiping here can leave the profile
+            // unresolvable for every later attempt (observed: 195 symlinks
+            // gone, all retries failing with ERR_UNSUPPORTED_DIR_IMPORT).
+            #[cfg(windows)]
             let _ = std::fs::remove_dir_all(profile_fallback);
             // Freshly-created profile junctions can take a while to become
             // visible to a new node process on Windows; back off generously.

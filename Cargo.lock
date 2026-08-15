@@ -418,7 +418,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dsh-desktop"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "libc",
  "muda",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "scopeguard"
-version = "1.2.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
