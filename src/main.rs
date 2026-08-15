@@ -53,17 +53,30 @@ fn main() {
     // profile heals, corrupting the shared runtime/profile state.
     #[cfg(windows)]
     {
+        use std::thread;
+        use std::time::Duration;
         use windows::core::w;
         use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
         use windows::Win32::System::Threading::CreateMutexW;
-        unsafe {
-            if CreateMutexW(None, false, w!("DSHDesktop.SingleInstance")).is_ok() {
-                // ERROR_ALREADY_EXISTS even on success means another instance holds it.
-                if GetLastError() == ERROR_ALREADY_EXISTS {
-                    std::process::exit(0);
+        // A just-closed instance still holds the mutex for a moment while
+        // WebView2 tears down; instead of exiting silently (which looks like
+        // "double-click does nothing"), wait briefly for it to die.
+        const GRACE_POLLS: u32 = 15;
+        for poll in 0..GRACE_POLLS {
+            unsafe {
+                if let Ok(handle) = CreateMutexW(None, false, w!("DSHDesktop.SingleInstance")) {
+                    if GetLastError() == ERROR_ALREADY_EXISTS {
+                        let _ = handle;
+                        if poll + 1 < GRACE_POLLS {
+                            thread::sleep(Duration::from_millis(200));
+                            continue;
+                        }
+                        std::process::exit(0);
+                    }
+                    // Intentionally leak the handle: process exit releases the mutex.
                 }
-                // Intentionally leak the handle: process exit releases the mutex.
             }
+            break;
         }
     }
 
