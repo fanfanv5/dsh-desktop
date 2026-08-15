@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod borderless;
 mod events;
 mod init_ui;
 mod lifecycle;
@@ -108,6 +109,14 @@ fn main() {
     let dark = system_prefers_dark();
     #[cfg(windows)]
     apply_window_chrome(&window, dark);
+    // Borderless: the in-page header bar (injected below) replaces the
+    // native caption; resize/snap/maximize stay native via the subclass.
+    #[cfg(windows)]
+    {
+        use tao::platform::windows::WindowExtWindows;
+        use windows::Win32::Foundation::HWND;
+        borderless::apply(HWND(window.hwnd() as *mut _));
+    }
     // dsh's bg-base token: #f9fafb light / #151517 dark.
     #[cfg(windows)]
     let webview_bg: wry::RGBA = if dark { (21, 21, 23, 255) } else { (249, 250, 251, 255) };
@@ -121,26 +130,148 @@ fn main() {
         .with_background_color(webview_bg)
         // Reveal the window only after the first frame is presented (double
         // rAF after DOMContentLoaded), so the user never sees a blank window.
-        // The theme bridge observes dsh's own data-ds-dark-theme attribute and
-        // reports every change (initial + in-app theme switches) so the native
-        // chrome follows the page — the script re-runs on every navigation.
+        // The same script also bridges theme changes to the native chrome and
+        // injects the in-page header bar (window controls) on every page.
         .with_initialization_script(
             r#"
 window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => requestAnimationFrame(() => { try { window.ipc.postMessage('__visible'); } catch (e) {} })));
 (function () {
+  function ipc(m) { try { window.ipc.postMessage(m); } catch (e) {} }
+  window.__dshDesktop = {
+    minimize: function () { ipc('__win:min'); },
+    toggleMaximize: function () { ipc('__win:max'); },
+    close: function () { ipc('__win:close'); },
+    startDrag: function () { ipc('__win:drag'); }
+  };
   var reported;
-  var start = function () {
+  function reportTheme() {
+    try { window.ipc.postMessage(document.body.hasAttribute('data-ds-dark-theme') ? '__theme:dark' : '__theme:light'); } catch (e) {}
+  }
+  function startTheme() {
     if (document.body && !reported) {
       reported = true;
-      var report = function () {
-        try { window.ipc.postMessage(document.body.hasAttribute('data-ds-dark-theme') ? '__theme:dark' : '__theme:light'); } catch (e) {}
-      };
-      new MutationObserver(report).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
-      report();
+      new MutationObserver(reportTheme).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
+      reportTheme();
     }
-  };
-  document.addEventListener('DOMContentLoaded', start);
-  setTimeout(start, 0);
+  }
+  var headerDone = false, headerBar = null;
+  function updateHeaderColor() {
+    if (!headerBar) return;
+    // dsw static palette is stable across pages/themes; the alias vars get
+    // redefined by the dsh theme layer at runtime.
+    var dark = document.body && document.body.hasAttribute('data-ds-dark-theme');
+    if (headerBar.dataset.mode === 'content') {
+      // Over the dsh content column: match its background (white / dark
+      // elevated), not the sidebar tone.
+      headerBar.style.background = dark
+        ? 'var(--dsw-static-neutral-bluish-875, #232324)'
+        : 'var(--dsw-static-neutral-bluish-00, #ffffff)';
+    } else {
+      headerBar.style.background = dark
+        ? 'var(--dsw-static-neutral-bluish-950, var(--bg-base, #151517))'
+        : 'var(--dsw-static-neutral-bluish-50, var(--bg-base, #f9fafb))';
+    }
+  }
+  function buildStrip() {
+    headerBar = document.createElement('div');
+    headerBar.id = 'dsh-desktop-header';
+    // No title: the dsh sidebar carries its own logo at the top; the bar is
+    // purely a drag surface + window controls.
+    headerBar.setAttribute('style',
+      'position:fixed;top:0;left:0;right:0;height:36px;z-index:2147483647;display:flex;align-items:stretch;justify-content:flex-end');
+    var right = document.createElement('div');
+    right.setAttribute('style', 'display:flex;height:100%');
+    var iconMin = '<svg width="10" height="10" viewBox="0 0 10 10"><rect y="4.5" width="10" height="1" fill="currentColor"/></svg>';
+    var iconMax = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>';
+    var iconClose = '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.1"/></svg>';
+    function makeButton(icon, action) {
+      var b = document.createElement('div');
+      b.className = 'dsh-winbtn';
+      b.innerHTML = icon;
+      b.setAttribute('style', 'width:46px;height:100%;display:flex;align-items:center;justify-content:center;cursor:default;color:var(--dsw-alias-label-secondary,var(--label-secondary,#61666b))');
+      var close = action === 'close';
+      b.addEventListener('mouseenter', function () {
+        b.style.background = close ? '#e81123' : 'rgba(128,128,128,.15)';
+        if (close) b.style.color = '#fff';
+      });
+      b.addEventListener('mouseleave', function () {
+        b.style.background = 'transparent';
+        b.style.color = 'var(--dsw-alias-label-secondary,var(--label-secondary,#61666b))';
+      });
+      b.addEventListener('click', function (e) { e.stopPropagation(); window.__dshDesktop[action](); });
+      return b;
+    }
+    right.appendChild(makeButton(iconMin, 'minimize'));
+    right.appendChild(makeButton(iconMax, 'toggleMaximize'));
+    right.appendChild(makeButton(iconClose, 'close'));
+    headerBar.appendChild(right);
+    // Drag anywhere on the bar (buttons excepted); the native NC drag loop
+    // also gives double-click-to-maximize and Aero snap for free.
+    headerBar.addEventListener('mousedown', function (e) {
+      if (e.button === 0 && !e.target.closest('.dsh-winbtn')) window.__dshDesktop.startDrag();
+    });
+  }
+  function installHeader() {
+    if (headerDone || !document.body) return;
+    headerDone = true;
+    if (window.__dshSetStatus) {
+      // Our own init page: full-width bar, push the whole page down.
+      buildStrip();
+      document.body.appendChild(headerBar);
+      updateHeaderColor();
+      document.documentElement.style.boxSizing = 'border-box';
+      document.documentElement.style.paddingTop = '36px';
+      return;
+    }
+    // dsh page: the sidebar goes full-height (its logo reaches the very
+    // top); only the content column is pushed below the 36px bar, which
+    // floats over the content area only — its left edge tracks the sidebar
+    // width (resize/collapse included, via ResizeObserver).
+    var tries = 0;
+    (function findFrame() {
+      var sidebar = document.querySelector('[data-slot="sidebar"]');
+      var sidebarCol = sidebar && sidebar.parentElement;
+      var frame = sidebarCol && sidebarCol.parentElement;
+      var main = null;
+      if (frame) {
+        for (var i = 0; i < frame.children.length; i++) {
+          var c = frame.children[i];
+          if (c !== sidebarCol && c.offsetWidth > 100) { main = c; break; }
+        }
+      }
+      if (!main) {
+        if (++tries < 50) return setTimeout(findFrame, 100);
+        // Layout hook not found (dsh update?): fall back to full-width bar.
+        buildStrip();
+        document.body.appendChild(headerBar);
+        updateHeaderColor();
+        document.documentElement.style.boxSizing = 'border-box';
+        document.documentElement.style.paddingTop = '36px';
+        return;
+      }
+      main.style.marginTop = '36px';
+      buildStrip();
+      headerBar.dataset.mode = 'content';
+      var syncLeft = function () {
+        headerBar.style.left = Math.round(sidebarCol.getBoundingClientRect().right) + 'px';
+      };
+      if (window.ResizeObserver) new ResizeObserver(syncLeft).observe(sidebarCol);
+      window.addEventListener('resize', syncLeft);
+      syncLeft();
+      document.body.appendChild(headerBar);
+      updateHeaderColor();
+    })();
+  }
+  function startTheme() {
+    if (document.body && !reported) {
+      reported = true;
+      new MutationObserver(function () { reportTheme(); updateHeaderColor(); })
+        .observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
+      reportTheme();
+    }
+  }
+  document.addEventListener('DOMContentLoaded', function () { startTheme(); installHeader(); });
+  setTimeout(function () { startTheme(); installHeader(); }, 0);
 })();
 "#,
         )
@@ -182,13 +313,30 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
                 // Internal pings must be checked first so they are never
                 // mistaken for commands. __theme fires on every page load and
                 // whenever the user switches the theme inside the dsh UI —
-                // the native chrome follows the page.
+                // the native chrome follows the page. __win:* come from the
+                // injected header bar (the window has no native caption).
                 if body.contains("__theme:dark") {
                     #[cfg(windows)]
                     apply_window_chrome(&window, true);
                 } else if body.contains("__theme:light") {
                     #[cfg(windows)]
                     apply_window_chrome(&window, false);
+                } else if body.contains("__win:min") {
+                    let _ = window.set_minimized(true);
+                } else if body.contains("__win:max") {
+                    let _ = window.set_maximized(!window.is_maximized());
+                } else if body.contains("__win:drag") {
+                    #[cfg(windows)]
+                    {
+                        use tao::platform::windows::WindowExtWindows;
+                        use windows::Win32::Foundation::HWND;
+                        borderless::begin_drag(HWND(window.hwnd() as *mut _));
+                    }
+                } else if body.contains("__win:close") {
+                    // Same path as CloseRequested: hide first, then teardown.
+                    let _ = window.set_visible(false);
+                    cleanup(&job, &state);
+                    *control_flow = ControlFlow::Exit;
                 } else if body.contains("__visible") {
                     if !revealed {
                         revealed = true;

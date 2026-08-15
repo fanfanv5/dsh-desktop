@@ -6,6 +6,8 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::node::NodeEnv;
+use crate::process::Job;
+use std::sync::Arc;
 
 pub const PKG: &str = "@deepseek-ai/dsh";
 
@@ -17,14 +19,18 @@ pub struct Runtime {
     pub node: PathBuf,
     pub npm_cli: PathBuf,
     pub runtime_dir: PathBuf,
+    /// Children (npm, prewarm node) are assigned here so closing the app
+    /// never leaves an orphaned install running.
+    job: Arc<Job>,
 }
 
 impl Runtime {
-    pub fn new(node_env: &NodeEnv, runtime_dir: PathBuf) -> Self {
+    pub fn new(node_env: &NodeEnv, runtime_dir: PathBuf, job: Arc<Job>) -> Self {
         Runtime {
             node: node_env.node.clone(),
             npm_cli: node_env.npm_cli.clone(),
             runtime_dir,
+            job,
         }
     }
 
@@ -93,6 +99,8 @@ impl Runtime {
         }
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = cmd.spawn() else { return };
+        // Kill-on-close even if the app is shut down mid-prewarm.
+        let _ = self.job.assign(child.id());
         let Some(stdout) = child.stdout.take() else { return };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -161,6 +169,8 @@ impl Runtime {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().ok()?;
+        // Kill-on-close even if the app is shut down mid-install.
+        let _ = self.job.assign(child.id());
         let stdout = child.stdout.take()?;
         let stderr = child.stderr.take()?;
 

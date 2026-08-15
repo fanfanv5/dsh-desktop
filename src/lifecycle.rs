@@ -83,7 +83,7 @@ fn run(proxy: Proxy, rx: Receiver<Command>, job: Arc<Job>, state: Arc<ProcessSta
             }
         };
 
-        let runtime = Runtime::new(&node_env, paths.runtime.clone());
+        let runtime = Runtime::new(&node_env, paths.runtime.clone(), job.clone());
         let mut installed = runtime.installed_version();
 
         // 2. Install if missing.
