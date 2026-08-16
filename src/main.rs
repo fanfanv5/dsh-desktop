@@ -540,6 +540,13 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
                 cleanup(&job, &state);
                 *control_flow = ControlFlow::Exit;
             }
+            // macOS: Cmd+Q / dock Quit / logout go through NSApplication
+            // terminate -> tao emits LoopDestroyed, NOT CloseRequested.
+            // Without this arm the dsh web tree survives app quit (orphaned
+            // node/sh/npm processes keep running in the background).
+            Event::LoopDestroyed => {
+                cleanup(&job, &state);
+            }
             _ => {}
         }
     });

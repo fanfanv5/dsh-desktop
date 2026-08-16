@@ -36,10 +36,18 @@ security import "$WORK/cert.pem" -k "$LOGIN_KEYCHAIN" -T /usr/bin/codesign
 # can pop an admin password dialog, so never let it block or fail the setup.
 security add-trusted-cert -p codeSign -k "$LOGIN_KEYCHAIN" "$WORK/cert.pem" 2>/dev/null || echo "(local trust settings skipped — not needed for signing)"
 
+# Grant codesign access to the new key. Without this the FIRST headless
+# signing fails with errSecInternalComponent (a GUI session would pop an
+# allow dialog instead). set-key-partition-list needs the login password;
+# skip when not provided and let the user click Always Allow once instead.
 if [ -n "$KEYCHAIN_PASSWORD" ]; then
   security set-key-partition-list -S apple-tool:,apple: -s \
     -k "$KEYCHAIN_PASSWORD" "$LOGIN_KEYCHAIN" >/dev/null
   echo "Key access pre-authorized for codesign."
+else
+  echo "Tip: export KEYCHAIN_PASSWORD='<login password>' before running to"
+  echo "pre-authorize codesign key access; otherwise click 'Always Allow' on"
+  echo "the first signing attempt."
 fi
 
 echo ""
