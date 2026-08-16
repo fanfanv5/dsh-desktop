@@ -1,0 +1,34 @@
+name: release-notes
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.2.3)"
+        required: true
+      file:
+        description: "Notes file under docs/release-notes/ (e.g. v1.2.3.md)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch release body from docs/release-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${{ inputs.tag }}"
+          FILE="docs/release-notes/${{ inputs.file }}"
+          [ -f "$FILE" ] || { echo "notes file $FILE not found" >&2; exit 1; }
+          # strip the "# vX.Y.Z ..." archive header line if present
+          tail -n +2 "$FILE" > body.md
+          gh api repos/${{ github.repository }}/releases --field tag_name="$TAG" >/dev/null 2>&1 || true
+          RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .id)
+          gh api -X PATCH "repos/${{ github.repository }}/releases/$RELEASE_ID" -F body=@body.md
+          echo "Release $TAG notes updated from $FILE"
