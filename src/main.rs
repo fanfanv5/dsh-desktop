@@ -20,6 +20,33 @@ use wry::WebViewBuilder;
 use events::{Command, UiEvent};
 use process::{Job, ProcessState};
 
+/// True when a URL belongs to the app itself and must stay inside the
+/// webview: the embedded init page (about:blank / wry-internal schemes) and
+/// the local dsh web server on loopback. Everything else is external.
+fn is_app_url(url: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else {
+        return false;
+    };
+    match u.scheme() {
+        "http" | "https" => u
+            .host_str()
+            .map(|h| h == "127.0.0.1" || h == "localhost" || h == "[::1]")
+            .unwrap_or(false),
+        // wry serves the initial init HTML over these; not real navigation.
+        "about" | "blob" | "data" => true,
+        _ => false,
+    }
+}
+
+/// Opens a URL with the system default browser (macOS: `open`, Windows:
+/// ShellExecute, Linux: xdg-open via the `open` crate). Used for external
+/// links clicked inside the embedded web UI.
+fn open_external(url: &str) {
+    if let Err(e) = open::that_detached(url) {
+        eprintln!("failed to open external url {url}: {e}");
+    }
+}
+
 fn main() {
     // Escape endpoint-security-injected process trees. The machine's security
     // agents (EsaFeNet DocGuard / Ronds EDR) mark some launch chains with an
@@ -400,6 +427,31 @@ window.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => re
                 let _ = proxy.send_event(UiEvent::Ipc(req.body().to_string()));
             }
         })
+        // External links (target="_blank" / window.open) must not navigate this
+        // webview away from the app, and must not be silently dropped either
+        // (WKWebView's default: no new window is ever created, so the click
+        // appears dead). Route them to the system default browser instead.
+        // Loopback URLs (the dsh web server) keep in-app navigation.
+        .with_new_window_req_handler(|url, _features| {
+            if is_app_url(&url) {
+                wry::NewWindowResponse::Allow
+            } else {
+                open_external(&url);
+                wry::NewWindowResponse::Deny
+            }
+        })
+        // Plain same-tab links to external sites must not navigate the app
+        // webview away either; hand them to the system browser as well.
+        // Everything the app itself loads (initial about:blank HTML, the
+        // 127.0.0.1 dsh web UI, wry-internal schemes) stays in-app.
+        .with_navigation_handler(|url| {
+            if is_app_url(&url) {
+                true
+            } else {
+                open_external(&url);
+                false
+            }
+        })
         .build(&window)
         .expect("failed to build webview");
 
@@ -645,4 +697,28 @@ fn js_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod main_tests {
+    use super::is_app_url;
+
+    #[test]
+    fn app_urls_stay_in_webview() {
+        assert!(is_app_url("http://127.0.0.1:53707/"));
+        assert!(is_app_url("http://localhost:53707/session"));
+        assert!(is_app_url("http://[::1]:8080/"));
+        assert!(is_app_url("about:blank"));
+        assert!(is_app_url("blob:whatever"));
+        assert!(is_app_url("data:text/plain,hi"));
+    }
+
+    #[test]
+    fn external_urls_are_redirected() {
+        assert!(!is_app_url("https://github.com/fanfanv5/dsh-desktop"));
+        assert!(!is_app_url("http://example.com/"));
+        assert!(!is_app_url("file:///etc/passwd"));
+        assert!(!is_app_url("javascript:alert(1)"));
+        assert!(!is_app_url("not a url"));
+    }
 }

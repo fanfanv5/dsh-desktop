@@ -360,9 +360,18 @@ fn log_spawn_context(log_dir: &Path, profile_fallback: &Path, attempt: u32) {
 pub fn watchdog_command(node: &Path, bin_js: &Path) -> Command {
     let node = node.to_string_lossy().replace('\'', r"'\''");
     let bin = bin_js.to_string_lossy().replace('\'', r"'\''");
+    // dsh spawns children whose shebangs are "#!/usr/bin/env node" (MCP
+    // servers, worker scripts). Under a GUI launch the inherited PATH lacks
+    // the node bin dir, so env(1) fails with "node: No such file or
+    // directory" and every spawn retry dies. Prepend the resolved node's
+    // dir so the whole child tree can re-exec node by name.
+    let node_dir = node
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_default();
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(format!(
-        "'{node}' '{bin}' web --port 0 & C=$!; trap 'kill $C' TERM INT; while kill -0 $PPID 2>/dev/null && kill -0 $C 2>/dev/null; do sleep 1; done; kill $C 2>/dev/null"
+        "PATH='{node_dir}':$PATH; export PATH; '{node}' '{bin}' web --port 0 & C=$!; trap 'kill $C' TERM INT; while kill -0 $PPID 2>/dev/null && kill -0 $C 2>/dev/null; do sleep 1; done; kill $C 2>/dev/null"
     ));
     cmd
 }
