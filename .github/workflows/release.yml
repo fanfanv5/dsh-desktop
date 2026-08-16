@@ -139,12 +139,11 @@ jobs:
           FILE="docs/release-notes/${TAG}.md"
           if [ -f "$FILE" ]; then
             tail -n +2 "$FILE" > body.md
-            echo "have=1" >> "$GITHUB_OUTPUT"
           else
-            echo "have=0" >> "$GITHUB_OUTPUT"
+            printf '**Full Changelog**: https://github.com/${{ github.repository }}/compare/...${GITHUB_REF_NAME}\n' > body.md
           fi
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           body_path: body.md
-          generate_release_notes: ${{ steps.notes.outputs.have != '1' }}
+          generate_release_notes: false
