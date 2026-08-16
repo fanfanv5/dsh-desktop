@@ -34,15 +34,23 @@
    git push origin v<x.y.z>
    ```
 
+3.5 **写 Release 说明文件**（发布前，不是发布后！）：
+
+   ```bash
+   # 新建 docs/release-notes/v<x.y.z>.md，首行固定为：
+   #   # v<x.y.z> Release Notes（存档）
+   # 其余内容按下面"Release Notes 模板"写
+   git add docs/release-notes/v<x.y.z>.md
+   ```
+
+   这个文件是 Release 说明的唯一来源：打 tag 后 CI 自动把它的正文
+   （去掉首行标题）发布为 GitHub Release body。没有这个文件时，CI 回退到
+   GitHub 自动生成的 release notes。文件同时留在仓库里做历史存档。
+
 4. **等待 CI**（约 10–15 分钟，三平台并行）：  
    https://github.com/fanfanv5/dsh-desktop/actions
 
-5. **写 Release 说明**：CI 成功后，到 Releases 页面编辑自动创建的 draft：
-   - 标题：`v<x.y.z>`
-   - 说明从下面"Release Notes 模板"节复制填写
-   - 发布（publish）
-
-6. **本地验证安装包**（发正式说明前自测）：
+5. **验证 Release**：确认 Release 说明来自 `docs/release-notes/v<x.y.z>.md`、三个平台的资产都在。需要时本地自测安装包：
 
    ```bash
    # macOS
