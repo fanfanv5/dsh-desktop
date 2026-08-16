@@ -28,6 +28,11 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleIconFile</key><string>dsh-desktop.icns</string>
   <key>LSMinimumSystemVersion</key><string>10.13</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- Make WebKit's native UI (context menu, spell check, date pickers) follow
+       the SYSTEM language instead of hardcoding English. Without these keys
+       WKWebView always shows English even on a fully localized macOS. -->
+  <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+  <key>CFBundleAllowMixedLocalizations</key><true/>
 </dict></plist>
 EOF
 touch "$APP"

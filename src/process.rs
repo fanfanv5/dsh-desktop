@@ -159,7 +159,19 @@ pub fn spawn_dsh(
         // static "Starting DSH…" for minutes while attempts churn.
         let _ = proxy.send_event(UiEvent::Status {
             title: "Starting DSH…".to_string(),
-            detail: format!("启动尝试 {}/{}，失败详情见 logs/dsh-web.err.log", attempt + 1, MAX_ATTEMPTS),
+            // First attempt is a normal boot in progress — mentioning failure
+            // logs here made healthy startups look broken (user quit and
+            // relaunched repeatedly). Only retries (attempt > 0) have actually
+            // failed something and should point at the error log.
+            detail: if attempt == 0 {
+                "正在启动 DSH 后台服务，通常需要几秒到十几秒，请稍候…".to_string()
+            } else {
+                format!(
+                    "第 {}/{} 次尝试：上次启动失败，失败详情见 logs/dsh-web.err.log",
+                    attempt + 1,
+                    MAX_ATTEMPTS
+                )
+            },
             actions: vec![],
         });
         if attempt > 0 {

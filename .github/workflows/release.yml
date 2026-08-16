@@ -71,6 +71,8 @@ jobs:
             <key>CFBundleIconFile</key><string>dsh-desktop.icns</string>
             <key>LSMinimumSystemVersion</key><string>10.13</string>
             <key>NSHighResolutionCapable</key><true/>
+            <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+            <key>CFBundleAllowMixedLocalizations</key><true/>
           </dict></plist>
           EOF
           tools/codesign-app.sh "DSH Desktop.app" com.dshdesktop.app
