@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Ask for removable-volume access up front instead of prompting per volume. -->
+  <key>com.apple.security.files.removable-volumes</key>
+  <true/>
+</dict>
+</plist>

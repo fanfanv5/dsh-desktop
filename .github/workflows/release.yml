@@ -41,6 +41,12 @@ jobs:
         run: cargo build --release --target aarch64-apple-darwin
       - name: Build (x86_64)
         run: cargo build --release --target x86_64-apple-darwin
+      - name: Import signing identity (optional; enables stable signature)
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: tools/ci-import-identity.sh
+
       - name: Package (universal .app + .dmg)
         run: |
           set -e
@@ -66,7 +72,11 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF
-          hdiutil create -volname "DSH Desktop" -srcfolder "DSH Desktop.app" -ov -format UDZO "DSH-Desktop-macos-universal.dmg"
+          tools/codesign-app.sh "DSH Desktop.app" com.dshdesktop.app
+          mkdir -p dmg-stage
+          mv "DSH Desktop.app" dmg-stage/
+          cp "installer/Install DSH Desktop.command" dmg-stage/
+          hdiutil create -volname "DSH Desktop" -srcfolder dmg-stage -ov -format UDZO "DSH-Desktop-macos-universal.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: dsh-desktop-macos-universal
